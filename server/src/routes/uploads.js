@@ -15,18 +15,9 @@ function generateUuid() {
 }
 
 // Multer upload config
-const uploadDir = path.join(__dirname, '../../uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => cb(null, `${Date.now()}_${file.originalname}`)
-});
-
+// Use memory storage for Vercel serverless compatibility
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
   fileFilter: (req, file, cb) => {
     if (file.mimetype.includes('csv') || file.originalname.endsWith('.csv') || file.mimetype.includes('text/plain')) {
@@ -36,6 +27,13 @@ const upload = multer({
     }
   }
 });
+
+// Write buffer to /tmp for processing (works on both local and Vercel)
+function saveTempFile(buffer, filename) {
+  const tmpPath = path.join('/tmp', `${Date.now()}_${filename}`);
+  fs.writeFileSync(tmpPath, buffer);
+  return tmpPath;
+}
 
 /**
  * Ultra-fast bulk upload job processor (Compatible with PostgreSQL and SQLite)
@@ -161,13 +159,16 @@ router.post('/', authMiddleware, upload.single('statement'), async (req, res) =>
     const userId = req.user.userId;
     const filename = req.file.originalname;
 
+    // Save buffer to temp file for processing
+    const tempFilePath = saveTempFile(req.file.buffer, filename);
+
     await db.run(
       'INSERT INTO uploads (id, user_id, filename, status) VALUES (?, ?, ?, ?)',
       [uploadId, userId, filename, 'processing']
     );
 
-    // Process job
-    processUploadJob(uploadId, userId, req.file.path)
+    // Process job with temp file path
+    processUploadJob(uploadId, userId, tempFilePath)
       .then(() => {})
       .catch((err) => console.error('Upload background task error:', err));
 
@@ -201,9 +202,10 @@ router.post('/:id/map', authMiddleware, upload.single('statement'), async (req, 
       amountCol
     };
 
+    const tempFilePath = saveTempFile(req.file.buffer, req.file.originalname);
     await db.run(`UPDATE uploads SET status = 'processing' WHERE id = ?`, [uploadId]);
 
-    processUploadJob(uploadId, req.user.userId, req.file.path, customMapping)
+    processUploadJob(uploadId, req.user.userId, tempFilePath, customMapping)
       .then(() => {})
       .catch((err) => console.error('Custom mapping job error:', err));
 
